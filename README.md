@@ -26,12 +26,12 @@ process. This hurdle can heavily hinder the development of this field. To addres
 
 <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin: 20px 0;">
   <div>
-    <h4>📈 On LJSpeech Benchmark</h4>
+    <h4>📈 On LibriTTS Benchmark</h4>
     <img src="./figure/performance_libritts.png" width="100%" height="auto" style="border-radius: 8px;">
   </div>
   <div>
-    <h4>📈 On LibriTTS Benchmark</h4>
-    <img src="./figure/performance_ljs.png" width="100%" height="auto" style="border-radius: 8px;">
+    <h4>📈 On LJSpeech Benchmark</h4>
+    <img src="./figure/performance_ljs.png" width="50%" height="auto" style="border-radius: 8px;">
   </div>
   <div>
     <h4>📈 On Out-of-Distributions Benchmarks</h4>
