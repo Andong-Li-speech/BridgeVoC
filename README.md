@@ -91,7 +91,6 @@ python enhancement.py --raw_wav_path /data4/xxx/datasets/LibriTTS/LibriTTS \
 
 #### Single-step (on LibriTTS dev-clean test set for instance)
 ```bash
-cd ../..
 CUDA_VISIBLE_DEVICES=0 python enhancement_single.py --raw_wav_path /data4/xxx/datasets/LibriTTS/LibriTTS \
                                                     --test_dir /data4/xxx/datasets/LibriTTS/LibriTTS/dev-clean-other \
                                                     --enhanced_dir ./test_decode/libritts/bridgevoc\
