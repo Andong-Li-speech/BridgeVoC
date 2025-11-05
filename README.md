@@ -183,8 +183,8 @@ cd starts/train
 </div>
 
 ### Performance scaling with DiT backbones
-#### Our method is the first to surpass 4.50 in PESQ when only scaling to 29.18 M, and also notably outperforms DiT with ~0.36B parameters
-#### We also support for edge-device processing, with the parameters as few as 0.19 M • 1.60 GMACs/5s per NFE
+#### Our method is the first to surpass 4.50 in PESQ when only scaling to 29.18 M, and also notably outperforms DiT with ~0.36B parameters.
+#### We also support for edge-device processing, with the parameters as few as 0.19 M • 1.60 GMACs/5s per NFE.
 <div style="margin: 20px 0;">
   <h4>🎯 Performance scaling effect</h4>
   <img src="./figure/Scaling_DiT.png" width="100%" height="auto" style="border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1);">
