@@ -96,7 +96,8 @@ class ScoreModelGAN(pl.LightningModule):
         # Store hyperparams and save them
         self.opt_type = opt_type
         self.ema_decay = ema_decay
-        self.ema = ExponentialMovingAverage(self.dnn.parameters(), decay=self.ema_decay)
+        self._ema_initialized = False
+        # self.ema = ExponentialMovingAverage(self.dnn.parameters(), decay=self.ema_decay)
         self._error_loading_ema = False
         self.t_eps = t_eps
 
@@ -210,6 +211,10 @@ class ScoreModelGAN(pl.LightningModule):
         t: (B,)
         """
         score = self.dnn(x, cond=y, time_cond=t)
+        if self._ema_initialized == False: # 等待第一次forward后才初始化ema
+            self.ema = ExponentialMovingAverage(self.dnn.parameters(), decay=self.ema_decay)
+            self._ema_initialized = True
+        
 
         return score
 
@@ -355,7 +360,8 @@ class ScoreModelGAN(pl.LightningModule):
         return loss
 
     def to(self, *args, **kwargs):
-        self.ema.to(*args, **kwargs)
+        if self._ema_initialized:
+            self.ema.to(*args, **kwargs)
         return super().to(*args, **kwargs)
 
     def get_pc_sampler(self, predictor_name, corrector_name, y, N=None, minibatch=None, scale_factor=None, **kwargs):
@@ -554,7 +560,8 @@ class SinModel(pl.LightningModule):
         self.beta2 = beta2
         self.lr = lr
         self.ema_decay = ema_decay
-        self.ema = ExponentialMovingAverage(self.dnn.parameters(), decay=self.ema_decay)
+        self._ema_initialized = False
+        # self.ema = ExponentialMovingAverage(self.dnn.parameters(), decay=self.ema_decay)
         self._error_loading_ema = False
         self.t_eps = t_eps
 
@@ -732,6 +739,9 @@ class SinModel(pl.LightningModule):
         t: (B,)
         """
         score = self.dnn(x, cond=y, time_cond=t)
+        if self._ema_initialized == False: # 等待第一次forward后才初始化ema
+            self.ema = ExponentialMovingAverage(self.dnn.parameters(), decay=self.ema_decay)
+            self._ema_initialized = True
 
         return score
 
@@ -920,7 +930,8 @@ class SinModel(pl.LightningModule):
             }, discriminator_ckp_path)
 
     def to(self, *args, **kwargs):
-        self.ema.to(*args, **kwargs)
+        if self._ema_initialized:
+            self.ema.to(*args, **kwargs)
         return super().to(*args, **kwargs)
 
     def train_dataloader(self):

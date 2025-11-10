@@ -115,7 +115,7 @@ class BandwiseC2LayerNorm(nn.Module):
       """
       mean_ = torch.mean(input, dim=1, keepdim=True)  # (B, 1, nband, T)
       std_ = torch.sqrt(torch.var(input, dim=1, unbiased=False, keepdim=True) + self.eps)  # (B, 1, nband, T)
-
+      
       if self.affine:
          output = self.gain_matrix * ((input - mean_) / std_) + self.bias_matrix 
       else:

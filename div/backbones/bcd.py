@@ -79,14 +79,18 @@ class BCD(nn.Module):
       self.use_adanorm = use_adanorm
       self.causal = causal
 
-      self.enc = SharedBandSplit_NB24_24k(input_channel=self.input_channel,
+      self.enc = SharedBandSplit(input_channel=self.input_channel,
                                           feature_dim=self.hidden_channel,
+                                          freq_split_ratio = [9, 12, 11],
+                                          band_num_list = [12, 8, 4],
                                           use_adanorm=self.use_adanorm,
                                           causal=self.causal,
                                           )
       self.nband = self.enc.get_nband()
-      self.dec = SharedBandMerge_NB24_24k(nband=self.nband,
+      self.dec = SharedBandMerge(nband=self.nband,
                                           feature_dim=self.hidden_channel,
+                                          freq_split_ratio = [9, 12, 11],
+                                          band_num_list = [12, 8, 4],
                                           use_adanorm=self.use_adanorm,
                                           decode_type=self.decode_type)
 
@@ -175,6 +179,7 @@ class BCD(nn.Module):
          time_ada_begin = self.time_ada_begin_nn(time_token)
 
       inpt_spec = torch.cat([inpt, cond], dim=1)
+      F = inpt_spec.shape[2]
       # band split
       enc_x = self.enc(inpt_spec, time_ada_begin=time_ada_begin)
       x = enc_x
@@ -185,11 +190,11 @@ class BCD(nn.Module):
 
       # band merge, different reconstrcution strategies
       if self.decode_type.lower() == "mag+phase":
-         cur_mag, cur_pha = self.dec(x, time_ada_final1=time_ada_final1, time_ada_final2=time_ada_final2)
+         cur_mag, cur_pha = self.dec(x, F, time_ada_final1=time_ada_final1, time_ada_final2=time_ada_final2)
          out_real, out_imag = cur_mag * torch.cos(cur_pha), cur_mag * torch.sin(cur_pha)
          out = torch.stack([out_real, out_imag], dim=1)
       elif self.decode_type.lower() == "ri":
-         out_real, out_imag = self.dec(x, time_ada_final1=time_ada_final1, time_ada_final2=time_ada_final2)
+         out_real, out_imag = self.dec(x, F, time_ada_final1=time_ada_final1, time_ada_final2=time_ada_final2)
          out = torch.cat([out_real, out_imag], dim=1)
       else:
          raise NotImplementedError("Only mag+phase and ri are supported, please check it carefully!")

@@ -280,42 +280,72 @@ class ApproximateGELU(nn.Module):
         return x * torch.sigmoid(1.702 * x)
 
 
-class SharedBandSplit_NB24_24k(nn.Module):
+class SharedBandSplit(nn.Module):
    def __init__(self,
                 input_channel: int = 4,
                 feature_dim: int = 64,
+                freq_split_ratio: list = [9, 12, 11],
+                band_num_list: list = [12, 8, 4],
                 use_adanorm: bool = False,
                 causal: bool = True,
                ):
-      super(SharedBandSplit_NB24_24k, self).__init__()
+      super(SharedBandSplit, self).__init__()
       self.input_channel = input_channel
       self.feature_dim = feature_dim
+      self.freq_split_ratio = freq_split_ratio
+      self.band_num_list = band_num_list
+      self.nband = sum(self.band_num_list)
       self.use_adanorm = use_adanorm
       self.causal = causal
       self.eps = torch.finfo(torch.float32).eps
       
       if self.causal:
-         pad = nn.ConstantPad2d([2, 0, 0, 0], value=0.)
+         self.pad = nn.ConstantPad2d([2, 0, 0, 0], value=0.)
       else:
-         pad = nn.ConstantPad2d([1, 1, 0, 0], value=0.)
+         self.pad = nn.ConstantPad2d([1, 1, 0, 0], value=0.)
+         
+      self.encoders = nn.ModuleList()
+      self.is_init_encoder = False
+
+   def init_encoder(self, F, device):
+      total_ratio = sum(self.freq_split_ratio)
+      if (F-1) % total_ratio != 0:
+         raise ValueError(
+               f"F-1 ({F-1}) must be divisible by sum(freq_split_ratio) = {total_ratio}."
+         )
+
+      one_F_split = (F-1) // total_ratio
+      self.F_split_sizes = []
+
+      for i, (ratio, band_num) in enumerate(zip(self.freq_split_ratio, self.band_num_list)):
+         F_split = one_F_split * ratio
+         self.F_split_sizes.append(F_split)
+         if F_split % band_num != 0:
+               raise ValueError(
+                  f"F_split[{i}] = {F_split} is not divisible by band_num_list[{i}] = {band_num}."
+               )
+
+         kernel_h = F_split // band_num 
+         assert kernel_h * band_num == F_split, "Internal error: division mismatch."
+
+         encoder = nn.Sequential(
+               self.pad,
+               nn.Conv2d(
+                  in_channels=self.input_channel,
+                  out_channels=self.feature_dim,
+                  kernel_size=(kernel_h, 3),
+                  stride=(kernel_h, 1),
+                  bias=not self.use_adanorm
+               ),
+               BandwiseC2LayerNorm(nband=band_num, feature_dim=self.feature_dim)
+         )
+         self.encoders.append(encoder.to(device))
       
-      self.reg1_encoder = nn.Sequential(
-          pad,
-          nn.Conv2d(in_channels=self.input_channel, out_channels=self.feature_dim, kernel_size=(12, 3), stride=(12, 1)),
-          BandwiseC2LayerNorm(nband=12, feature_dim=self.feature_dim)
-      )
-      self.reg2_encoder = nn.Sequential(
-          pad,
-          nn.Conv2d(in_channels=self.input_channel, out_channels=self.feature_dim, kernel_size=(24, 3), stride=(24, 1)),
-          BandwiseC2LayerNorm(nband=8, feature_dim=self.feature_dim)
-      )
-      self.reg3_encoder = nn.Sequential(
-          pad,
-          nn.Conv2d(in_channels=self.input_channel, out_channels=self.feature_dim, kernel_size=(44, 3), stride=(44, 1)),
-          BandwiseC2LayerNorm(nband=4, feature_dim=self.feature_dim)
-      )
-      self.nband = 12 + 8 + 4
-      print(f'Totally splitting {self.nband} bands for sampling rate: 24k.')
+      print("SharedBandSplit encoder initialized.")
+      print(f"freq_split_ratio: {self.freq_split_ratio}")
+      print(f"F_split_list: {self.F_split_sizes}")
+      print(f"band_num_list: {self.band_num_list}")
+      self.is_init_encoder = True
 
    def get_nband(self):
       return self.nband
@@ -326,11 +356,24 @@ class SharedBandSplit_NB24_24k(nn.Module):
       log_input: (B, F, T)
       return: (B, nband, C, T)
       """
-      batch_size = input.shape[0]
-      x1, x2, x3 = input[..., :144, :], input[..., 144:336, :], input[..., 336:-1, :]
-      y1, y2, y3 = self.reg1_encoder(x1), self.reg2_encoder(x2), self.reg3_encoder(x3)
-
-      out = torch.cat([y1, y2, y3], dim=-2)  # (B, C, nband, C)
+      batch_size, C_in, F, T = input.shape
+      device = input.device
+      if not self.is_init_encoder:
+         self.init_encoder(F, device)
+         
+      start = 0
+      input_splits = []
+      for size in self.F_split_sizes:
+         end = start + size
+         input_splits.append(input[:, :, start:end, :])
+         start = end
+         
+      outputs = []
+      for encoder, x_seg in zip(self.encoders, input_splits):
+         out = encoder(x_seg)
+         outputs.append(out)
+         
+      out = torch.cat(outputs, dim=-2)
 
       if self.use_adanorm:
          shift, scale = time_ada_begin.reshape(batch_size, 2, -1).chunk(2, dim=1)
@@ -339,89 +382,85 @@ class SharedBandSplit_NB24_24k(nn.Module):
 
       return out
 
-
-class SharedBandMerge_NB24_24k(nn.Module):
+class SharedBandMerge(nn.Module):
    def __init__(self,
                 nband: int,
                 feature_dim: int = 64,
+                freq_split_ratio: list = [9, 12, 11],
+                band_num_list: list = [12, 8, 4],
                 use_adanorm: bool = False,
                 decode_type: str = 'mag+phase',  
                ):
-      super(SharedBandMerge_NB24_24k, self).__init__()
+      super(SharedBandMerge, self).__init__()
       self.nband = nband
       self.feature_dim = feature_dim
+      self.freq_split_ratio = freq_split_ratio
+      self.band_num_list = band_num_list
       self.use_adanorm = use_adanorm
       self.decode_type = decode_type
       self.eps = torch.finfo(torch.float32).eps
 
       self.norm1 = BandwiseC2LayerNorm(nband=self.nband, feature_dim=self.feature_dim)
       self.norm2 = BandwiseC2LayerNorm(nband=self.nband, feature_dim=self.feature_dim)
+      
       if self.decode_type.lower() == "mag+phase":
-         self.reg1_mag_decoder = nn.Sequential(
-            nn.Conv2d(in_channels=self.feature_dim, out_channels=self.feature_dim * 2, kernel_size=(1, 1)),
-            nn.GELU(),
-            nn.ConvTranspose2d(in_channels=self.feature_dim * 2, out_channels=1, kernel_size=(12, 1), stride=(12, 1))
-         )
-         self.reg2_mag_decoder = nn.Sequential(
-            nn.Conv2d(in_channels=self.feature_dim, out_channels=self.feature_dim * 2, kernel_size=(1, 1)),
-            nn.GELU(),
-            nn.ConvTranspose2d(in_channels=self.feature_dim * 2, out_channels=1, kernel_size=(24, 1), stride=(24, 1))
-         )
-         self.reg3_mag_decoder = nn.Sequential(
-            nn.Conv2d(in_channels=self.feature_dim, out_channels=self.feature_dim * 2, kernel_size=(1, 1)),
-            nn.GELU(),
-            nn.ConvTranspose2d(in_channels=self.feature_dim * 2, out_channels=1, kernel_size=(44, 1), stride=(44, 1))
-         )
-         self.reg1_phase_decoder = nn.Sequential(
-            nn.Conv2d(in_channels=self.feature_dim, out_channels=self.feature_dim * 2, kernel_size=(1, 1)),
-            nn.GELU(),
-            nn.ConvTranspose2d(in_channels=self.feature_dim * 2, out_channels=2, kernel_size=(12, 1), stride=(12, 1))
-         )
-         self.reg2_phase_decoder = nn.Sequential(
-            nn.Conv2d(in_channels=self.feature_dim, out_channels=self.feature_dim * 2, kernel_size=(1, 1)),
-            nn.GELU(),
-            nn.ConvTranspose2d(in_channels=self.feature_dim * 2, out_channels=2, kernel_size=(24, 1), stride=(24, 1))
-         )
-         self.reg3_phase_decoder = nn.Sequential(
-            nn.Conv2d(in_channels=self.feature_dim, out_channels=self.feature_dim * 2, kernel_size=(1, 1)),
-            nn.GELU(),
-            nn.ConvTranspose2d(in_channels=self.feature_dim * 2, out_channels=2, kernel_size=(44, 1), stride=(44, 1))
-         )
+         self.mag_decoder = nn.ModuleList()
+         self.phase_decoder = nn.ModuleList()
       elif self.decode_type.lower() == "ri":
-         self.reg1_real_decoder = nn.Sequential(
-            nn.Conv2d(in_channels=self.feature_dim, out_channels=self.feature_dim * 2, kernel_size=(1, 1)),
-            nn.GELU(),
-            nn.ConvTranspose2d(in_channels=self.feature_dim * 2, out_channels=1, kernel_size=(12, 1), stride=(12, 1))
-         )
-         self.reg2_real_decoder = nn.Sequential(
-            nn.Conv2d(in_channels=self.feature_dim, out_channels=self.feature_dim * 2, kernel_size=(1, 1)),
-            nn.GELU(),
-            nn.ConvTranspose2d(in_channels=self.feature_dim * 2, out_channels=1, kernel_size=(24, 1), stride=(24, 1))
-         )
-         self.reg3_real_decoder = nn.Sequential(
-            nn.Conv2d(in_channels=self.feature_dim, out_channels=self.feature_dim * 2, kernel_size=(1, 1)),
-            nn.GELU(),
-            nn.ConvTranspose2d(in_channels=self.feature_dim * 2, out_channels=1, kernel_size=(44, 1), stride=(44, 1))
-         )
-         self.reg1_imag_decoder = nn.Sequential(
-            nn.Conv2d(in_channels=self.feature_dim, out_channels=self.feature_dim * 2, kernel_size=(1, 1)),
-            nn.GELU(),
-            nn.ConvTranspose2d(in_channels=self.feature_dim * 2, out_channels=1, kernel_size=(12, 1), stride=(12, 1))
-         )
-         self.reg2_imag_decoder = nn.Sequential(
-            nn.Conv2d(in_channels=self.feature_dim, out_channels=self.feature_dim * 2, kernel_size=(1, 1)),
-            nn.GELU(),
-            nn.ConvTranspose2d(in_channels=self.feature_dim * 2, out_channels=1, kernel_size=(24, 1), stride=(24, 1))
-         )
-         self.reg3_imag_decoder = nn.Sequential(
-            nn.Conv2d(in_channels=self.feature_dim, out_channels=self.feature_dim * 2, kernel_size=(1, 1)),
-            nn.GELU(),
-            nn.ConvTranspose2d(in_channels=self.feature_dim * 2, out_channels=1, kernel_size=(44, 1), stride=(44, 1))
-         )
+         self.real_decoder = nn.ModuleList()
+         self.imag_decoder = nn.ModuleList()
       else:
          raise NotImplementedError("Only Mag+Phase and RI are supported for decoding!")
+      self.is_init_decoder = False
+      
+   def init_decoder(self, F, device):
+      total_ratio = sum(self.freq_split_ratio)
 
-   def forward(self, emb_input, time_ada_final1=None, time_ada_final2=None):
+      one_F_split = (F-1) // total_ratio
+      self.F_split_sizes = []
+
+      for i, (ratio, band_num) in enumerate(zip(self.freq_split_ratio, self.band_num_list)):
+         F_split = one_F_split * ratio
+         self.F_split_sizes.append(F_split)
+         kernel_h = F_split // band_num 
+         if self.decode_type.lower() == "mag+phase":
+               temp_mag_decoder = nn.Sequential(
+                  nn.Conv2d(in_channels=self.feature_dim, out_channels=self.feature_dim * 2, kernel_size=(1, 1)),
+                  nn.GELU(),
+                  nn.ConvTranspose2d(in_channels=self.feature_dim * 2, out_channels=1, kernel_size=(kernel_h, 1), stride=(kernel_h, 1))
+               )
+               temp_phase_decoder = nn.Sequential(
+                  nn.Conv2d(in_channels=self.feature_dim, out_channels=self.feature_dim * 2, kernel_size=(1, 1)),
+                  nn.GELU(),
+                  nn.ConvTranspose2d(in_channels=self.feature_dim * 2, out_channels=2, kernel_size=(kernel_h, 1), stride=(kernel_h, 1))
+               )
+               
+               self.mag_decoder.append(temp_mag_decoder.to(device))
+               self.phase_decoder.append(temp_phase_decoder.to(device))
+
+         elif self.decode_type.lower() == "ri":
+               temp_real_decoder = nn.Sequential(
+                  nn.Conv2d(in_channels=self.feature_dim, out_channels=self.feature_dim * 2, kernel_size=(1, 1)),
+                  nn.GELU(),
+                  nn.ConvTranspose2d(in_channels=self.feature_dim * 2, out_channels=1, kernel_size=(kernel_h, 1), stride=(kernel_h, 1))
+               )
+               temp_imag_decoder = nn.Sequential(
+                  nn.Conv2d(in_channels=self.feature_dim, out_channels=self.feature_dim * 2, kernel_size=(1, 1)),
+                  nn.GELU(),
+                  nn.ConvTranspose2d(in_channels=self.feature_dim * 2, out_channels=1, kernel_size=(kernel_h, 1), stride=(kernel_h, 1))
+               )
+               
+               self.real_decoder.append(temp_real_decoder.to(device))
+               self.imag_decoder.append(temp_imag_decoder.to(device))
+         else:
+               raise NotImplementedError("Only Mag+Phase and RI are supported for decoding!")
+      
+      print("SharedBandMerge decoder initialized.")
+      print(f"freq_split_ratio: {self.freq_split_ratio}")
+      print(f"F_split_list: {self.F_split_sizes}")
+      self.is_init_decoder = True
+
+   def forward(self, emb_input, F, time_ada_final1=None, time_ada_final2=None):
       """
       emb_input: (B, C, nband, T)
       time_ada_final1: (B, C) or None
@@ -430,7 +469,11 @@ class SharedBandMerge_NB24_24k(nn.Module):
          mag: (B, F, T)
          phase: (B, F, T)
       """
-      batch_size = emb_input.shape[0]
+      batch_size, C, nband, T = emb_input.shape
+      device = emb_input.device
+      if not self.is_init_decoder:
+         self.init_decoder(F, device)
+         
       emb_input1, emb_input2 = self.norm1(emb_input), self.norm2(emb_input)
       if self.use_adanorm:
          shift1, scale1 = time_ada_final1.reshape(batch_size, 2, -1).chunk(2, dim=1)
@@ -440,27 +483,39 @@ class SharedBandMerge_NB24_24k(nn.Module):
          shift2, scale2 = shift2.squeeze(1), scale2.squeeze(1)
          emb_input2 = film_modulate(emb_input2, shift2, scale2)
 
-      x1_1, x1_2, x1_3 = emb_input1[:, :, :12].contiguous(), \
-                         emb_input1[:, :, 12:20].contiguous(), \
-                         emb_input1[:, :, 20:].contiguous()
-      x2_1, x2_2, x2_3 = emb_input2[:, :, :12].contiguous(), \
-                         emb_input2[:, :, 12:20].contiguous(), \
-                         emb_input2[:, :, 20:].contiguous()
+      input_splits1 = []
+      input_splits2 = []
+      start = 0
+      for size in self.band_num_list:
+         end = start + size
+         input_splits1.append(emb_input1[:, :, start:end, :])
+         input_splits2.append(emb_input2[:, :, start:end, :])
+         start = end
 
       if self.decode_type.lower() == "mag+phase":
-         mag1, mag2, mag3 = self.reg1_mag_decoder(x1_1), self.reg2_mag_decoder(x1_2), self.reg3_mag_decoder(x1_3)
-         com1, com2, com3 = self.reg1_phase_decoder(x2_1), self.reg2_phase_decoder(x2_2), self.reg3_phase_decoder(x2_3)
-         mag = torch.cat([mag1, mag2, mag3], dim=-2) 
-         com = torch.cat([com1, com2, com3], dim=-2)
+         mag_list = []
+         com_lisr = []
+         for i, (mag_decoder, phase_decoder, x1_seg, x2_seg) in enumerate(zip(self.mag_decoder, self.phase_decoder, input_splits1, input_splits2)):
+            mag = mag_decoder(x1_seg)
+            com = phase_decoder(x2_seg)
+            mag_list.append(mag)
+            com_lisr.append(com)
+         mag = torch.cat(mag_list, dim=-2)
+         com = torch.cat(com_lisr, dim=-2)
          last_mag, last_com = mag[..., -1, :].unsqueeze(-2), com[..., -1, :].unsqueeze(-2)
          mag, com = torch.cat([mag, last_mag], dim=-2), torch.cat([com, last_com], dim=-2)
          pha = torch.atan2(com[:, -1], com[:, 0])
          return torch.exp(mag.squeeze(1)), pha
       elif self.decode_type.lower() == "ri":
-         real1, real2, real3 = self.reg1_real_decoder(x1_1), self.reg2_real_decoder(x1_2), self.reg3_real_decoder(x1_3)
-         imag1, imag2, imag3 = self.reg1_imag_decoder(x2_1), self.reg2_imag_decoder(x2_2), self.reg3_imag_decoder(x2_3)
-         real = torch.cat([real1, real2, real3], dim=-2)
-         imag = torch.cat([imag1, imag2, imag3], dim=-2)
+         real_list = []
+         imag_list = []
+         for i, (real_decoder, imag_decoder, x1_seg, x2_seg) in enumerate(zip(self.real_decoder, self.imag_decoder, input_splits1, input_splits2)):
+            real = real_decoder(x1_seg)
+            imag = imag_decoder(x2_seg)
+            real_list.append(real)
+            imag_list.append(imag)
+         real = torch.cat(real_list, dim=-2)
+         imag = torch.cat(imag_list, dim=-2)
          last_real, last_imag = real[..., -1, :].unsqueeze(-2), imag[..., -1, :].unsqueeze(-2)
          real, imag = torch.cat([real, last_real], dim=-2), torch.cat([imag, last_imag], dim=-2)
          return real, imag
