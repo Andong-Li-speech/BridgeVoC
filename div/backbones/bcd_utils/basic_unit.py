@@ -307,14 +307,14 @@ class SharedBandSplit(nn.Module):
       self.encoders = nn.ModuleList()
       self.is_init_encoder = False
 
-   def init_encoder(self, F):
+   def init_encoder(self, F, device):
       total_ratio = sum(self.freq_split_ratio)
-      if F-1 % total_ratio != 0:
+      if (F-1) % total_ratio != 0:
          raise ValueError(
                f"F-1 ({F-1}) must be divisible by sum(freq_split_ratio) = {total_ratio}."
          )
 
-      one_F_split = F-1 // total_ratio
+      one_F_split = (F-1) // total_ratio
       self.F_split_sizes = []
 
       for i, (ratio, band_num) in enumerate(zip(self.freq_split_ratio, self.band_num_list)):
@@ -339,7 +339,7 @@ class SharedBandSplit(nn.Module):
                ),
                BandwiseC2LayerNorm(nband=band_num, feature_dim=self.feature_dim)
          )
-         self.encoders.append(encoder)
+         self.encoders.append(encoder.to(device))
       
       print("SharedBandSplit encoder initialized.")
       print(f"freq_split_ratio: {self.freq_split_ratio}")
@@ -357,8 +357,9 @@ class SharedBandSplit(nn.Module):
       return: (B, nband, C, T)
       """
       batch_size, C_in, F, T = input.shape
+      device = input.device
       if not self.is_init_encoder:
-         self.init_encoder(F)
+         self.init_encoder(F, device)
          
       start = 0
       input_splits = []
@@ -412,10 +413,10 @@ class SharedBandMerge(nn.Module):
          raise NotImplementedError("Only Mag+Phase and RI are supported for decoding!")
       self.is_init_decoder = False
       
-   def init_decoder(self, F):
+   def init_decoder(self, F, device):
       total_ratio = sum(self.freq_split_ratio)
 
-      one_F_split = F-1 // total_ratio
+      one_F_split = (F-1) // total_ratio
       self.F_split_sizes = []
 
       for i, (ratio, band_num) in enumerate(zip(self.freq_split_ratio, self.band_num_list)):
@@ -423,36 +424,43 @@ class SharedBandMerge(nn.Module):
          self.F_split_sizes.append(F_split)
          kernel_h = F_split // band_num 
          if self.decode_type.lower() == "mag+phase":
-            self.mag_decoder.append(nn.Sequential(
-               nn.Conv2d(in_channels=self.feature_dim, out_channels=self.feature_dim * 2, kernel_size=(1, 1)),
-               nn.GELU(),
-               nn.ConvTranspose2d(in_channels=self.feature_dim * 2, out_channels=1, kernel_size=(kernel_h, 1), stride=(kernel_h, 1))
-            ))
-            self.phase_decoder.append(nn.Sequential(
-               nn.Conv2d(in_channels=self.feature_dim, out_channels=self.feature_dim * 2, kernel_size=(1, 1)),
-               nn.GELU(),
-               nn.ConvTranspose2d(in_channels=self.feature_dim * 2, out_channels=2, kernel_size=(kernel_h, 1), stride=(kernel_h, 1))
-            ))
+               temp_mag_decoder = nn.Sequential(
+                  nn.Conv2d(in_channels=self.feature_dim, out_channels=self.feature_dim * 2, kernel_size=(1, 1)),
+                  nn.GELU(),
+                  nn.ConvTranspose2d(in_channels=self.feature_dim * 2, out_channels=1, kernel_size=(kernel_h, 1), stride=(kernel_h, 1))
+               )
+               temp_phase_decoder = nn.Sequential(
+                  nn.Conv2d(in_channels=self.feature_dim, out_channels=self.feature_dim * 2, kernel_size=(1, 1)),
+                  nn.GELU(),
+                  nn.ConvTranspose2d(in_channels=self.feature_dim * 2, out_channels=2, kernel_size=(kernel_h, 1), stride=(kernel_h, 1))
+               )
+               
+               self.mag_decoder.append(temp_mag_decoder.to(device))
+               self.phase_decoder.append(temp_phase_decoder.to(device))
+
          elif self.decode_type.lower() == "ri":
-            self.real_decoder.append(nn.Sequential(
-               nn.Conv2d(in_channels=self.feature_dim, out_channels=self.feature_dim * 2, kernel_size=(1, 1)),
-               nn.GELU(),
-               nn.ConvTranspose2d(in_channels=self.feature_dim * 2, out_channels=1, kernel_size=(kernel_h, 1), stride=(kernel_h, 1))
-            ))
-            self.imag_decoder.append(nn.Sequential(
-               nn.Conv2d(in_channels=self.feature_dim, out_channels=self.feature_dim * 2, kernel_size=(1, 1)),
-               nn.GELU(),
-               nn.ConvTranspose2d(in_channels=self.feature_dim * 2, out_channels=1, kernel_size=(kernel_h, 1), stride=(kernel_h, 1))
-            ))
+               temp_real_decoder = nn.Sequential(
+                  nn.Conv2d(in_channels=self.feature_dim, out_channels=self.feature_dim * 2, kernel_size=(1, 1)),
+                  nn.GELU(),
+                  nn.ConvTranspose2d(in_channels=self.feature_dim * 2, out_channels=1, kernel_size=(kernel_h, 1), stride=(kernel_h, 1))
+               )
+               temp_imag_decoder = nn.Sequential(
+                  nn.Conv2d(in_channels=self.feature_dim, out_channels=self.feature_dim * 2, kernel_size=(1, 1)),
+                  nn.GELU(),
+                  nn.ConvTranspose2d(in_channels=self.feature_dim * 2, out_channels=1, kernel_size=(kernel_h, 1), stride=(kernel_h, 1))
+               )
+               
+               self.real_decoder.append(temp_real_decoder.to(device))
+               self.imag_decoder.append(temp_imag_decoder.to(device))
          else:
-            raise NotImplementedError("Only Mag+Phase and RI are supported for decoding!")
+               raise NotImplementedError("Only Mag+Phase and RI are supported for decoding!")
       
       print("SharedBandMerge decoder initialized.")
       print(f"freq_split_ratio: {self.freq_split_ratio}")
       print(f"F_split_list: {self.F_split_sizes}")
       self.is_init_decoder = True
 
-   def forward(self, emb_input, time_ada_final1=None, time_ada_final2=None):
+   def forward(self, emb_input, F, time_ada_final1=None, time_ada_final2=None):
       """
       emb_input: (B, C, nband, T)
       time_ada_final1: (B, C) or None
@@ -462,8 +470,9 @@ class SharedBandMerge(nn.Module):
          phase: (B, F, T)
       """
       batch_size, C, nband, T = emb_input.shape
+      device = emb_input.device
       if not self.is_init_decoder:
-         self.init_decoder(F=T)
+         self.init_decoder(F, device)
          
       emb_input1, emb_input2 = self.norm1(emb_input), self.norm2(emb_input)
       if self.use_adanorm:

@@ -179,6 +179,7 @@ class BCD(nn.Module):
          time_ada_begin = self.time_ada_begin_nn(time_token)
 
       inpt_spec = torch.cat([inpt, cond], dim=1)
+      F = inpt_spec.shape[2]
       # band split
       enc_x = self.enc(inpt_spec, time_ada_begin=time_ada_begin)
       x = enc_x
@@ -189,11 +190,11 @@ class BCD(nn.Module):
 
       # band merge, different reconstrcution strategies
       if self.decode_type.lower() == "mag+phase":
-         cur_mag, cur_pha = self.dec(x, time_ada_final1=time_ada_final1, time_ada_final2=time_ada_final2)
+         cur_mag, cur_pha = self.dec(x, F, time_ada_final1=time_ada_final1, time_ada_final2=time_ada_final2)
          out_real, out_imag = cur_mag * torch.cos(cur_pha), cur_mag * torch.sin(cur_pha)
          out = torch.stack([out_real, out_imag], dim=1)
       elif self.decode_type.lower() == "ri":
-         out_real, out_imag = self.dec(x, time_ada_final1=time_ada_final1, time_ada_final2=time_ada_final2)
+         out_real, out_imag = self.dec(x, F, time_ada_final1=time_ada_final1, time_ada_final2=time_ada_final2)
          out = torch.cat([out_real, out_imag], dim=1)
       else:
          raise NotImplementedError("Only mag+phase and ri are supported, please check it carefully!")
